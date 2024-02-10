@@ -1,7 +1,8 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from nltk.tokenize import sent_tokenize
+import requests
+from io import StringIO
 
 # Set the page icon
 st.set_page_config(page_title="Election News Dashboard", 
@@ -9,17 +10,18 @@ st.set_page_config(page_title="Election News Dashboard",
                    initial_sidebar_state="expanded")
 
 # Load the dataframe
-@st.cache_data
-def load_data(file):
-    data = pd.read_csv(file, encoding='utf8')
-    
+@st.cache
+def load_data(url):
+    # Fetch data from URL
+    response = requests.get(url)
+    # Convert response content to a pandas DataFrame
+    data = pd.read_csv(StringIO(response.text), encoding='utf8')
     # Convert the 'Date' column to datetime format
     data['Date'] = pd.to_datetime(data['Date'])
-    
     return data
-# Load the data
 
-df = load_data("pemilu/indonesia-election-2024-dataset.csv")
+# Load the data from the provided URL
+df = load_data("https://huggingface.co/datasets/casecrit/2024-indonesian-election/raw/main/indonesia-election-2024-dataset.csv")
 
 # Adjust column widths
 column_widths = {
