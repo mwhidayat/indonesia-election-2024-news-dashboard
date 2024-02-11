@@ -91,61 +91,39 @@ if option == "Data Visualisation":
     # Article Trends Over Time
     st.subheader("Article Trends Over Time #1")
 
-    st.text("The line chart shows the trends in the number of articles published over time.")
+    st.text("The chart shows the trends in the number of articles published over time.")
 
     chart_data_all = df.groupby(['Date', 'Publication']).size().reset_index(name='Article Count')
     fig = px.line(chart_data_all, x='Date', y='Article Count', color='Publication', color_discrete_sequence=color_scale)
 
     # Make the line smooth
     fig.update_traces(line_shape='spline')
-    fig.update_layout(width=700, height=450)
+    fig.update_layout(width=700, height=350)
     st.plotly_chart(fig, use_container_width=True)
 
     # Pivot the data to prepare for a stacked bar chart
     pivot_data = chart_data_all.pivot(index='Date', columns='Publication', values='Article Count').fillna(0)
 
-    # Article Trends Over Time
+    # Function to count total article frequency over time
+    def count_total_article_frequency_over_time(data: pd.DataFrame) -> pd.DataFrame:
+        total_article_frequency_over_time = data.groupby('Date').size().reset_index(name='Total Articles')
+        return total_article_frequency_over_time
+
+    # Calculate total article frequency over time
+    total_article_freq_over_time_df = count_total_article_frequency_over_time(df)
+
+    # Display the line chart for total article trends over time
     st.subheader("Article Trends Over Time #2")
 
-    # Explanation of the chart
-    st.text("The stacked-bar chart visualizes the trends in the number of articles published\nover time. Each bar represents a date, and the height of each segment\nwithin the bar corresponds to the number of articles published\nby different publications on that date.")
+    st.text("This chart illustrates the total number of articles published over time\nacross all publications.")
 
-    # Create a stacked bar chart
-    fig = px.bar(pivot_data, x=pivot_data.index, y=pivot_data.columns,
-                labels={'Date': 'Date', 'value': 'Article Count', 'variable': 'Publication'},
-                color_discrete_sequence=color_scale,
-                width=700, height=450)
-    fig.update_layout(barmode='stack')
-    st.plotly_chart(fig, use_container_width=True)
+    # Plotting the line chart for total article trends over time
+    fig = px.line(total_article_freq_over_time_df, x='Date', y='Total Articles', 
+                labels={'Date': 'Date', 'Total Articles': 'Total Articles'})
 
-    # Function to count word frequency in titles
-    def count_word_frequency_in_titles(data: pd.DataFrame, words: list) -> pd.DataFrame:
-        word_frequency = {word: 0 for word in words}
-
-        for title in data['Title']:
-            for word in words:
-                # Check for the word Muhaimin and Imin
-                if word.lower() in title.lower() or (word.lower() == 'muhaimin' and 'imin' in title.lower()):
-                    word_frequency[word] += 1
-
-        return pd.DataFrame(list(word_frequency.items()), columns=['Word', 'Frequency'])
-
-    # Words to count frequency for
-    words_to_count = ['Anies', 'Muhaimin', 'Amin', 'Prabowo', 'Gibran', 'Ganjar', 'Mahfud']
-
-    # Display the bar chart
-    st.subheader("Candidate Mentions in Titles")
-
-    st.text("Anies-Muhaimin is the only candidate pair with an official tagline called 'Amin'.\nAs a result, there are articles where the tagline is used interchangeably with\ntheir names, requiring separate treatment in visualising the data. Additionally,\nMuhaimin is sometimes referred to as 'Imin', 'Gus Imin' or 'Cak Imin', which\nmust be accounted for in the visualisation.")
-
-    word_freq_df = count_word_frequency_in_titles(df, words_to_count)
-
-    # Update the label for 'Muhaimin' to 'Muhamain' in the DataFrame
-    word_freq_df.loc[word_freq_df['Word'] == 'Muhaimin', 'Word'] = 'Muhaimin'
-
-    fig = px.bar(word_freq_df, x='Frequency', y='Word', orientation='h', color='Word', 
-                color_discrete_sequence=color_scale)
-    fig.update_layout(width=700, height=350, showlegend=False)
+    # Make the line smooth
+    fig.update_traces(line_shape='spline')
+    fig.update_layout(width=700, height=350)
     st.plotly_chart(fig, use_container_width=True)
 
     # Function to count word frequency in titles over time for each candidate
@@ -179,7 +157,7 @@ if option == "Data Visualisation":
 
     st.text("This chart illustrates the frequency of each candidate's name\nmentioned in the news titles over time.")
 
-    # Plotting the historical line chart
+    # Plotting the line chart
     fig = px.line(word_freq_over_time_melted, x='Date', y='Frequency', color='Candidate', 
                 color_discrete_sequence=color_scale)
 
@@ -191,6 +169,36 @@ if option == "Data Visualisation":
     fig.update_traces(line_shape='spline')
 
     # Show the chart
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Function to count word frequency in titles
+    def count_word_frequency_in_titles(data: pd.DataFrame, words: list) -> pd.DataFrame:
+        word_frequency = {word: 0 for word in words}
+
+        for title in data['Title']:
+            for word in words:
+                # Check for the word Muhaimin and Imin
+                if word.lower() in title.lower() or (word.lower() == 'muhaimin' and 'imin' in title.lower()):
+                    word_frequency[word] += 1
+
+        return pd.DataFrame(list(word_frequency.items()), columns=['Word', 'Frequency'])
+
+    # Words to count frequency for
+    words_to_count = ['Anies', 'Muhaimin', 'Amin', 'Prabowo', 'Gibran', 'Ganjar', 'Mahfud']
+
+    # Display the bar chart
+    st.subheader("Candidate Mentions in Titles")
+
+    st.text("Anies-Muhaimin is the only candidate pair with an official tagline called 'Amin'.\nAs a result, there are articles where the tagline is used interchangeably with\ntheir names, requiring separate treatment in visualising the data. Additionally,\nMuhaimin is sometimes referred to as 'Imin', 'Gus Imin' or 'Cak Imin', which\nmust be accounted for in the visualisation.")
+
+    word_freq_df = count_word_frequency_in_titles(df, words_to_count)
+
+    # Update the label for 'Muhaimin' to 'Muhamain' in the DataFrame
+    word_freq_df.loc[word_freq_df['Word'] == 'Muhaimin', 'Word'] = 'Muhaimin'
+
+    fig = px.bar(word_freq_df, x='Frequency', y='Word', orientation='h', color='Word', 
+                color_discrete_sequence=color_scale)
+    fig.update_layout(width=700, height=350, showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
     # Function to count word frequency in titles for each publication
