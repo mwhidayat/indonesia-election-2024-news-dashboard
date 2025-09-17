@@ -1,294 +1,374 @@
-import streamlit as st
+# app_no_alias.py
+import re
+import json
+import html
+from datetime import datetime
 import pandas as pd
+import numpy as np
 import plotly.express as px
-from nltk.tokenize import sent_tokenize
+import streamlit as st
 
-# Set the page icon
-st.set_page_config(page_title="Election News Dashboard", 
-                   page_icon=":bar_chart:",
+# Optional: nltk for sentence tokenization (used in KWIC fallback)
+try:
+    import nltk
+    nltk.data.find("tokenizers/punkt")
+except Exception:
+    try:
+        import nltk
+        nltk.download("punkt", quiet=True)
+    except Exception:
+        pass
+
+# -------------------------
+# Page config & helpers
+# -------------------------
+st.set_page_config(page_title="Election News Dashboard",
+                   page_icon="🗳️",
+                   layout="wide",
                    initial_sidebar_state="expanded")
 
-# Load the dataframe
 @st.cache_data
-def load_data(file):
-    data = pd.read_csv(file, encoding='utf8')
-    
-    # Convert the 'Date' column to datetime format
-    data['Date'] = pd.to_datetime(data['Date'])
-    
-    return data
-# Load the data
+def load_data(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path, encoding="utf-8", parse_dates=["Date"])
+    required = {"Date", "Title", "Text", "Publication"}
+    if not required.issubset(df.columns):
+        raise ValueError(f"CSV missing columns: {required - set(df.columns)}")
+    df["Title"] = df["Title"].fillna("").astype(str)
+    df["Text"] = df["Text"].fillna("").astype(str)
+    df["Publication"] = df["Publication"].fillna("Unknown").astype(str)
+    df["Date_only"] = df["Date"].dt.normalize()
+    return df
 
-df = load_data("indonesia-election-2024-dataset.csv")
+# -------------------------
+# Load
+# -------------------------
+DATA_FILE = "indonesia-election-2024-dataset.csv"
+df = load_data(DATA_FILE)
 
-# Adjust column widths
-column_widths = {
-    'Date': 50,
-    'Title': 200,
-    'Text': 300,
-    'Publication': 50
+# -------------------------
+# Sidebar filters
+# -------------------------
+st.sidebar.header("Filters")
+min_date = df["Date_only"].min().date()
+max_date = df["Date_only"].max().date()
+date_range = st.sidebar.date_input("Date range", [min_date, max_date], min_value=min_date, max_value=max_date)
+
+pubs = sorted(df["Publication"].unique())
+selected_pubs = st.sidebar.multiselect("Publications", pubs, default=pubs)
+
+# Candidate alias mapping (hardcoded)
+default_aliases = {
+    "Prabowo": ["prabowo"],
+    "Ganjar": ["ganjar"],
+    "Gibran": ["gibran"],
+    "Anies": ["anies"],
+    "Muhaimin": ["muhaimin", "imin", "gus imin", "cak imin"],
+    "Amin": ["amin"],
+    "Mahfud": ["mahfud"]
 }
+# "Edit aliases" UI removed per request. To change aliases, edit the default_aliases dict in the code.
+candidate_aliases = default_aliases
 
-# Calculate total width
-total_width = sum(column_widths.values())
+all_candidates = list(candidate_aliases.keys())
+selected_candidates = st.sidebar.multiselect("Candidates to display", all_candidates, default=all_candidates)
 
-# Set the page title
-st.title("Indonesia Election 2024")
+st.sidebar.markdown("---")
+st.sidebar.caption("Results update live as you change filters. Use Search tab for detailed queries.")
 
-# Sidebar menu
-option = st.sidebar.selectbox("Select a feature", ["Data Visualisation", "Search News", "Key Word in Context"])
+# -------------------------
+# Apply filters
+# -------------------------
+start_date, end_date = (date_range if len(date_range) == 2 else (min_date, max_date))
+start_dt = pd.to_datetime(start_date)
+end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
-if option == "Data Visualisation":
-    import plotly.express as px
+df_filtered = df[(df["Date"] >= start_dt) & (df["Date"] <= end_dt) & (df["Publication"].isin(selected_pubs))].copy()
 
-    # Define a custom color scale for each publication
-    color_scale = px.colors.qualitative.Set2
+# -------------------------
+# Utility functions
+# -------------------------
+def build_alias_pattern(aliases):
+    esc = [re.escape(a) for a in aliases]
+    return r"(?:" + r"|".join(esc) + r")"
 
-    # Data Visualisation page
-    st.header("Data Visualisation")
+def highlight_html(text: str, query: str, use_regex=False):
+    """Return HTML-escaped text with <mark> around matches."""
+    if not text:
+        return ""
+    escaped = html.escape(text)
+    if use_regex:
+        try:
+            patt = re.compile(query, flags=re.IGNORECASE)
+        except re.error:
+            return escaped
+        def repl(m):
+            return f"<mark>{html.escape(m.group(0))}</mark>"
+        return patt.sub(repl, html.escape(text))
+    else:
+        patt = re.compile(re.escape(query), flags=re.IGNORECASE)
+        return patt.sub(lambda m: f"<mark>{html.escape(m.group(0))}</mark>", escaped)
 
-    st.text("The data ranges from 2023-11-29 to 2024-02-06 and includes all five\npresidential debates organized by the General Elections Commission.\nThe data sources comprise detik, kompas, and liputan6.")
-    
-    # Article Count per Publication
-    st.subheader("Article Count per Publication")
+def kwic_rows(text: str, query: str, window=7):
+    """Return list of (left, keyword, right) occurrences for KWIC (word-window), case-insensitive."""
+    if not text:
+        return []
+    words = re.split(r"\s+", text.strip())
+    lowers = [w.lower() for w in words]
+    q_tokens = re.split(r"\s+", query.strip().lower())
+    q_len = len(q_tokens)
+    rows = []
+    for i in range(len(words)):
+        segment = " ".join(lowers[i:i+q_len])
+        if segment == " ".join(q_tokens):
+            left_idx = max(0, i - window)
+            right_idx = min(len(words), i + q_len + window)
+            left = " ".join(words[left_idx:i])
+            kw = " ".join(words[i:i+q_len])
+            right = " ".join(words[i+q_len:right_idx])
+            rows.append((left, kw, right))
+    return rows
 
-    st.text("The length of each bar represents the number of articles, and\neach bar is color-coded to represent a different publication.")
+# -------------------------
+# Tabs: Overview | Trends | Search | Key Word in Context | Data
+# -------------------------
+tabs = st.tabs(["Overview", "Trends", "Search", "Key Word in Context", "Data"])
 
-    chart_data_total = df.groupby('Publication').size().reset_index(name='Total Article')
-    fig = px.bar(chart_data_total, x='Total Article', y='Publication', orientation='h', color='Publication', color_discrete_sequence=color_scale)
-    fig.update_layout(width=700, height=350, showlegend=False)
+####################
+# OVERVIEW TAB
+####################
+with tabs[0]:
+    st.header("Overview")
+    # Use three compact metrics (removed 'Unique titles')
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total articles", f"{len(df_filtered):,}")
+    c2.metric("Publications", f"{df_filtered['Publication'].nunique()}")
+    # Always show the selected sidebar date range (clear and stable) instead of inferring from filtered data
+    date_range_str = f"{pd.to_datetime(start_date).date()} → {pd.to_datetime(end_date).date()}"
+    c3.metric("Selected date range", date_range_str)
+
+    st.markdown("**Article distribution by publication**")
+    article_counts = df_filtered["Publication"].value_counts().reset_index()
+    article_counts.columns = ["Publication", "Count"]
+    fig = px.bar(article_counts, x="Count", y="Publication", orientation="h", color="Publication",
+                 color_discrete_sequence=px.colors.qualitative.Set2, title="Articles by Publication")
+    fig.update_layout(showlegend=False, height=360)
     st.plotly_chart(fig, use_container_width=True)
 
-    # Daily and Weekly Average Charts for each Publication
-    st.subheader("Average Daily and Weekly Articles")
+    st.markdown("**Daily total (stacked by publication)**")
+    timeseries = (df_filtered.groupby([pd.Grouper(key="Date", freq="D"), "Publication"])\
+                  .size().reset_index(name="count"))
+    if timeseries.empty:
+        st.info("No data in the selected range / publications.")
+    else:
+        pivot = timeseries.pivot(index="Date", columns="Publication", values="count").fillna(0)
+        pivot = pivot.resample("D").sum()
+        y_cols = list(pivot.columns)
+        fig_area = px.area(pivot.reset_index(), x="Date", y=y_cols, color_discrete_sequence=px.colors.qualitative.Set2)
+        fig_area.update_layout(height=420)
+        st.plotly_chart(fig_area, use_container_width=True)
 
-    st.text("These charts shows the daily and weekly averages of articles published.")
+####################
+# TRENDS TAB
+####################
+with tabs[1]:
+    st.header("Trends")
+    st.markdown("Mentions of selected candidates in article titles over time (normalized by aliases).")
 
-    # Calculate daily and weekly averages for each publication
-    daily_avg_per_pub = df.groupby(['Date', 'Publication']).size().groupby('Publication').mean()
-    weekly_avg_per_pub = df.groupby([pd.Grouper(key='Date', freq='W'), 'Publication']).size().groupby('Publication').mean()
+    for cand in selected_candidates:
+        aliases = candidate_aliases.get(cand, [cand])
+        patt = build_alias_pattern(aliases)
+        df_filtered[f"cand__{cand}"] = df_filtered["Title"].str.contains(patt, flags=re.IGNORECASE, na=False, regex=True)
 
-    # Overall daily and weekly averages
-    overall_daily_avg = df.groupby('Date').size().mean()
-    overall_weekly_avg = df.groupby(pd.Grouper(key='Date', freq='W')).size().mean()
+    cand_cols = [f"cand__{c}" for c in selected_candidates] if selected_candidates else []
+    if cand_cols:
+        cand_series = (df_filtered.groupby(pd.Grouper(key="Date", freq="D"))[cand_cols]
+                       .sum().reset_index().melt(id_vars="Date", var_name="candidate", value_name="count"))
+        cand_series["candidate"] = cand_series["candidate"].str.replace("^cand__", "", regex=True)
+    else:
+        cand_series = pd.DataFrame(columns=["Date", "candidate", "count"])
 
-    # Create bar chart for daily and weekly averages for each publication
-    avg_data_per_pub = pd.DataFrame({'Daily Average': daily_avg_per_pub, 'Weekly Average': weekly_avg_per_pub})
-    avg_data_per_pub.reset_index(inplace=True)
+    if cand_series.empty or cand_series["count"].sum() == 0:
+        st.info("No mentions of selected candidates in titles for current filters.")
+    else:
+        fig_cand = px.line(cand_series, x="Date", y="count", color="candidate",
+                           color_discrete_sequence=px.colors.qualitative.Set2)
+        fig_cand.update_traces(line_shape="spline")
+        fig_cand.update_layout(height=420)
+        st.plotly_chart(fig_cand, use_container_width=True)
 
-    # Add overall averages to the DataFrame
-    overall_avg_data = pd.DataFrame({'Publication': ['Overall'], 
-                                    'Daily Average': [overall_daily_avg], 
-                                    'Weekly Average': [overall_weekly_avg]})
-    avg_data_per_pub = pd.concat([avg_data_per_pub, overall_avg_data])
+        st.markdown("**Total mentions (bar)**")
+        totals = cand_series.groupby("candidate")["count"].sum().reset_index().sort_values("count", ascending=True)
+        fig_bar = px.bar(totals, x="count", y="candidate", orientation="h",
+                         color="candidate", color_discrete_sequence=px.colors.qualitative.Set2)
+        fig_bar.update_layout(showlegend=False, height=340)
+        st.plotly_chart(fig_bar, use_container_width=True)
 
-    fig = px.bar(avg_data_per_pub, x='Publication', y=['Daily Average', 'Weekly Average'], 
-                barmode='group', color_discrete_sequence=color_scale,
-                labels={'Publication': 'Publication', 'value': 'Average Articles', 'variable': 'Timeframe'})
-    fig.update_layout(width=700, height=350)
-    st.plotly_chart(fig, use_container_width=True)
+####################
+# SEARCH TAB
+####################
+with tabs[2]:
+    st.header("Search")
+    st.markdown("Full-text search on Title + Text. Results show highlighted snippets and the option to download matches.")
 
-    # Article Trends Over Time
-    st.subheader("Article Trends Over Time #1")
+    col_q1, col_q2, col_q3 = st.columns([4, 1, 1])
+    query = col_q1.text_input("Search query (substring or regex)", placeholder="e.g. Prabowo OR \"Gus Imin\"")
+    use_regex = col_q2.checkbox("Use regex", value=False)
+    scope = col_q3.selectbox("Search in", ["Title + Text", "Title", "Text"], index=0)
 
-    st.text("The chart shows the trends in the number of articles published over time.")
+    if query:
+        patt = None
+        if use_regex:
+            try:
+                patt = re.compile(query, flags=re.IGNORECASE)
+            except re.error as e:
+                st.error(f"Invalid regex: {e}")
+                patt = None
 
-    chart_data_all = df.groupby(['Date', 'Publication']).size().reset_index(name='Article Count')
-    fig = px.line(chart_data_all, x='Date', y='Article Count', color='Publication', color_discrete_sequence=color_scale)
+        def matches_row(row):
+            hay = ""
+            if scope == "Title + Text":
+                hay = f"{row['Title']} {row['Text']}"
+            elif scope == "Title":
+                hay = row["Title"]
+            else:
+                hay = row["Text"]
+            if not isinstance(hay, str) or hay.strip() == "":
+                return False
+            if patt:
+                return bool(patt.search(hay))
+            return query.lower() in hay.lower()
 
-    # Make the line smooth
-    fig.update_traces(line_shape='spline')
-    fig.update_layout(width=700, height=350)
-    st.plotly_chart(fig, use_container_width=True)
+        matched = df_filtered[df_filtered.apply(matches_row, axis=1)].copy().reset_index(drop=True)
+        st.write(f"Found **{len(matched):,}** results")
 
-    # Pivot the data to prepare for a stacked bar chart
-    pivot_data = chart_data_all.pivot(index='Date', columns='Publication', values='Article Count').fillna(0)
+        if not matched.empty:
+            displayed = []
+            for _, r in matched.iterrows():
+                raw = (r["Title"] + ". " + r["Text"]).strip()
+                if not raw:
+                    continue
+                if patt:
+                    m = patt.search(raw)
+                    if m:
+                        start = max(0, m.start() - 120)
+                        end = min(len(raw), m.end() + 120)
+                        snippet_raw = raw[start:end]
+                    else:
+                        snippet_raw = raw[:300]
+                    preview_html = highlight_html(snippet_raw, query, use_regex=True)
+                else:
+                    idx = raw.lower().find(query.lower())
+                    if idx == -1:
+                        snippet_raw = raw[:300]
+                    else:
+                        start = max(0, idx - 120)
+                        end = min(len(raw), idx + 120)
+                        snippet_raw = raw[start:end]
+                    preview_html = highlight_html(snippet_raw, query, use_regex=False)
 
-    # Function to count total article frequency over time
-    def count_total_article_frequency_over_time(data: pd.DataFrame) -> pd.DataFrame:
-        total_article_frequency_over_time = data.groupby('Date').size().reset_index(name='Total Articles')
-        return total_article_frequency_over_time
+                preview_html = preview_html if len(html.unescape(preview_html)) <= 1000 else preview_html[:1000] + "..."
+                displayed.append({
+                    "Date": r["Date"].date(),
+                    "Publication": r["Publication"],
+                    "Title": html.escape(r["Title"]),
+                    "Preview": preview_html,
+                    "FullText": html.escape(r["Text"])
+                })
 
-    # Calculate total article frequency over time
-    total_article_freq_over_time_df = count_total_article_frequency_over_time(df)
+            for item in displayed:
+                title_for_expander = f"{item['Date']} — {item['Publication']} — {html.unescape(item['Title'])[:120]}"
+                with st.expander(title_for_expander):
+                    st.markdown(f"**Preview:**<br><div style='line-height:1.4'>{item['Preview']}</div>", unsafe_allow_html=True)
+                    st.markdown("---")
+                    st.write("Full text (raw):")
+                    st.write(html.unescape(item["FullText"])[:3000] + ("..." if len(item["FullText"]) > 3000 else ""))
 
-    # Display the line chart for total article trends over time
-    st.subheader("Article Trends Over Time #2")
+            st.download_button("Download matches as CSV", data=matched.to_csv(index=False), file_name="search_matches.csv", mime="text/csv")
 
-    st.text("This chart illustrates the total number of articles published over time\nacross all publications.")
-
-    # Plotting the line chart for total article trends over time
-    fig = px.line(total_article_freq_over_time_df, x='Date', y='Total Articles', 
-                labels={'Date': 'Date', 'Total Articles': 'Total Articles'})
-
-    # Make the line smooth
-    fig.update_traces(line_shape='spline')
-    fig.update_layout(width=700, height=350)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Function to count word frequency in titles over time for each candidate
-    def count_word_frequency_over_time(data: pd.DataFrame, words: list) -> pd.DataFrame:
-        word_frequency_over_time = {word: [] for word in words}
-
-        for word in words:
-            word_frequency_series = data[data['Title'].str.contains(word, case=False)]['Date'].value_counts().sort_index()
-            word_frequency_over_time[word] = word_frequency_series
-
-        return pd.DataFrame(word_frequency_over_time)
-
-    # Words to count frequency for
-    candidates_to_count = ['Anies', 'Muhaimin', 'Amin', 'Prabowo', 'Gibran', 'Ganjar', 'Mahfud']
-
-    # Count word frequency over time
-    word_freq_over_time_df = count_word_frequency_over_time(df, candidates_to_count)
-
-    # Reset index to have 'Date' as a column
-    word_freq_over_time_df = word_freq_over_time_df.reset_index().rename(columns={'index': 'Date'})
-
-    # Melt the dataframe to have 'Candidate' and 'Frequency' columns
-    word_freq_over_time_melted = word_freq_over_time_df.melt(id_vars='Date', var_name='Candidate', value_name='Frequency')
-
-    # Create a line chart for candidate occurrences over time
-    fig = px.line(word_freq_over_time_melted, x='Date', y='Frequency', color='Candidate', 
-                color_discrete_sequence=color_scale)
-
-    # Displaying the historical chart for candidate mentions in titles over time
-    st.subheader("Candidate Mentions in Titles Over Time")
-
-    st.text("This chart illustrates the frequency of each candidate's name\nmentioned in the news titles over time.")
-
-    # Plotting the line chart
-    fig = px.line(word_freq_over_time_melted, x='Date', y='Frequency', color='Candidate', 
-                color_discrete_sequence=color_scale)
-
-    # Add title and axis labels
-    fig.update_layout(xaxis_title='Date',
-                    yaxis_title='Frequency')
-
-    # Make the line smooth
-    fig.update_traces(line_shape='spline')
-
-    # Show the chart
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Function to count word frequency in titles
-    def count_word_frequency_in_titles(data: pd.DataFrame, words: list) -> pd.DataFrame:
-        word_frequency = {word: 0 for word in words}
-
-        for title in data['Title']:
-            for word in words:
-                # Check for the word Muhaimin and Imin
-                if word.lower() in title.lower() or (word.lower() == 'muhaimin' and 'imin' in title.lower()):
-                    word_frequency[word] += 1
-
-        return pd.DataFrame(list(word_frequency.items()), columns=['Word', 'Frequency'])
-
-    # Words to count frequency for
-    words_to_count = ['Anies', 'Muhaimin', 'Amin', 'Prabowo', 'Gibran', 'Ganjar', 'Mahfud']
-
-    # Display the bar chart
-    st.subheader("Candidate Mentions in Titles")
-
-    st.text("Anies-Muhaimin is the only candidate pair with an official tagline called 'Amin'.\nAs a result, there are articles where the tagline is used interchangeably with\ntheir names, requiring separate treatment in visualising the data. Additionally,\nMuhaimin is sometimes referred to as 'Imin', 'Gus Imin' or 'Cak Imin', which\nmust be accounted for in the visualisation.")
-
-    word_freq_df = count_word_frequency_in_titles(df, words_to_count)
-
-    # Update the label for 'Muhaimin' to 'Muhamain' in the DataFrame
-    word_freq_df.loc[word_freq_df['Word'] == 'Muhaimin', 'Word'] = 'Muhaimin'
-
-    fig = px.bar(word_freq_df, x='Frequency', y='Word', orientation='h', color='Word', 
-                color_discrete_sequence=color_scale)
-    fig.update_layout(width=700, height=350, showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Function to count word frequency in titles for each publication
-    def count_word_frequency_in_titles_per_publication(data: pd.DataFrame, words: list) -> pd.DataFrame:
-        word_frequency_per_pub = {pub: {word: 0 for word in words} for pub in data['Publication'].unique()}
-
-        for pub in data['Publication'].unique():
-            pub_data = data[data['Publication'] == pub]
-            for title in pub_data['Title']:
-                for word in words:
-                    if word.lower() in title.lower() or (word.lower() == 'muhaimin' and 'imin' in title.lower()):
-                        word_frequency_per_pub[pub][word] += 1
-
-        return pd.DataFrame(word_frequency_per_pub).transpose()
-
-    # Words to count frequency for
-    words_to_count = ['Anies', 'Muhaimin', 'Amin', 'Prabowo', 'Gibran', 'Ganjar', 'Mahfud']
-
-    # Display the bar chart for candidate mentions in titles per publication
-    st.subheader("Candidate Mentions in Titles per Publication")
-
-    st.text("This chart illustrates the frequency of each candidate's name\nmentioned in the news titles, categorized by publication.")
-
-    word_freq_per_pub_df = count_word_frequency_in_titles_per_publication(df, words_to_count)
-
-    # Melt the dataframe to have 'Publication', 'Candidate', and 'Frequency' columns
-    word_freq_per_pub_melted = word_freq_per_pub_df.reset_index().melt(id_vars='index', var_name='Candidate', value_name='Frequency')
-    word_freq_per_pub_melted.rename(columns={'index': 'Publication'}, inplace=True)
-
-    # Create a horizontal stacked bar chart for candidate mentions in titles per publication
-    fig = px.bar(word_freq_per_pub_melted, x='Candidate', y='Frequency', color='Publication',
-                color_discrete_sequence=color_scale)
-
-    # Add title and axis labels
-    fig.update_layout(xaxis_title="Frequency",
-                    yaxis_title="Candidate")
-
-    # Show the chart
-    st.plotly_chart(fig, use_container_width=True)
-
-elif option == "Search News":
-
-    # Search function
-    st.header("Search News")
-    st.text("Enter a keyword or a phrase to search for relevant news articles.")
-
-    search_query = st.text_input("Keyword to search for")
-
-    if search_query:
-        # Filter the dataframe based on the search query
-        filtered_df = df[df['Text'].str.contains(search_query, case=False)]
-
-        # Display the search results
-        st.write(f"### Search Results for \"{search_query}\"")
-        st.dataframe(filtered_df[['Date', 'Title', 'Text', 'Publication']], width=total_width, height=None, use_container_width=True)
-
-elif option == "Key Word in Context":
-    # Concordance / Key Word in Context function
+####################
+# KWIC TAB
+####################
+with tabs[3]:
+    # Concordance / Key Word in Context function (supports single word or multi-word phrase)
     def display_concordance(data: pd.DataFrame, col: str, keyword: str, window_size: int = 7) -> pd.DataFrame:
         concordance_lines = []
 
-        for index, row in data.iterrows():
-            text = row[col]
-            words = text.split()
-            
-            for i, word in enumerate(words):
-                if word == keyword:
-                    start = max(0, i - window_size)
-                    end = min(len(words), i + window_size + 1)
-                    left_context = ' '.join(words[start:i])
-                    keyword_in_context = ' '.join(words[i:i+1])
-                    right_context = ' '.join(words[i+1:end])
-                    
-                    concordance_lines.append({
-                        "Left context": left_context,
-                        "Key Word": keyword_in_context,
-                        "Right context": right_context,
-                        "Publication": row["Publication"],
-                        "Title": row["Title"]
+        if not isinstance(keyword, str) or keyword.strip() == "":
+            return pd.DataFrame(concordance_lines)
 
-                    })
+        # Prepare normalized keyword tokens (lowercased, stripped punctuation)
+        kw_tokens = [re.sub(r"\W+", "", t).lower() for t in keyword.strip().split() if t.strip()]
+        if not kw_tokens:
+            return pd.DataFrame(concordance_lines)
+        kw_len = len(kw_tokens)
+
+        for index, row in data.iterrows():
+            text = row.get(col, "")
+            if not isinstance(text, str) or text.strip() == "":
+                continue
+
+            words = text.split()
+            # normalized words for matching but keep original words for context
+            norm_words = [re.sub(r"\W+", "", w).lower() for w in words]
+
+            # slide over tokens to find phrase matches
+            for i in range(0, max(1, len(words) - kw_len + 1)):
+                try:
+                    if all(norm_words[i + j] == kw_tokens[j] for j in range(kw_len)):
+                        start = max(0, i - window_size)
+                        end = min(len(words), i + kw_len + window_size)
+                        left_context = ' '.join(words[start:i])
+                        keyword_in_context = ' '.join(words[i:i + kw_len])
+                        right_context = ' '.join(words[i + kw_len:end])
+
+                        concordance_lines.append({
+                            "Left context": left_context,
+                            "Key Word": keyword_in_context,
+                            "Right context": right_context,
+                            "Publication": row.get("Publication", ""),
+                            "Title": row.get("Title", "")
+
+                        })
+                except IndexError:
+                    # defensive: skip if indexing goes out of range
+                    continue
         return pd.DataFrame(concordance_lines)
 
-    # Concordance page
     st.header("Key Word in Context")
-    st.text("Explore occurrences of a keyword within the data along with contextual snippets.")
-    selected_column = st.selectbox("To use this feature, please choose either the 'Text' or 'Title' column", df.columns)
-    keyword = st.text_input("Enter a keyword (only a single word)")
+    st.text("Explore occurrences of a keyword or phrase within the filtered data along with contextual snippets.")
+    # Restrict selectable columns to Title or Text
+    selected_column = st.selectbox("Choose column to search (Title or Text)", ["Text", "Title"])
+    keyword = st.text_input("Enter a keyword or phrase (single word or multi-word phrase)")
+
+    # Context window: presets + optional custom numeric input (more precise than a slider)
+    preset_options = [3, 5, 7, 10, 15, 20, "Custom"]
+    preset_index = 2  # default to 7
+    choice = st.selectbox("Context window (words each side)", preset_options, index=preset_index)
+
+    if choice == "Custom":
+        window_size = int(st.number_input("Custom window size (words each side)", min_value=1, max_value=200, value=7, step=1))
+    else:
+        window_size = int(choice)
+
+    st.caption("Presets for speed — choose Custom to type any number precisely.")
 
     if keyword:
-        concordance_df = display_concordance(df, selected_column, keyword)
+        concordance_df = display_concordance(df_filtered, selected_column, keyword, window_size)
         st.write(f"### Key Word in Context for \"{keyword}\" in {selected_column}")
-        st.dataframe(concordance_df, width=total_width, height=None, use_container_width=True)
+        if concordance_df.empty:
+            st.info("No occurrences found in the filtered data.")
+        else:
+            st.dataframe(concordance_df, use_container_width=True)
+
+####################
+# DATA TAB
+####################
+with tabs[4]:
+    st.header("Data Explorer")
+    st.markdown("Preview and download the filtered dataset.")
+    with st.expander("Preview (first 200 rows)"):
+        st.dataframe(df_filtered[["Date", "Publication", "Title", "Text"]].head(200), use_container_width=True)
+    st.download_button("Download filtered data (CSV)", data=df_filtered.to_csv(index=False), file_name="filtered_data.csv", mime="text/csv")
+
+# Footer note
+st.markdown("---")
