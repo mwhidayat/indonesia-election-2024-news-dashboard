@@ -53,8 +53,6 @@ min_date = df["Date_only"].min().date()
 max_date = df["Date_only"].max().date()
 date_range = st.sidebar.date_input("Date range", [min_date, max_date], min_value=min_date, max_value=max_date)
 
-pubs = sorted(df["Publication"].unique())
-selected_pubs = st.sidebar.multiselect("Publications", pubs, default=pubs)
 
 # Candidate alias mapping (hardcoded)
 default_aliases = {
@@ -71,6 +69,9 @@ candidate_aliases = default_aliases
 
 all_candidates = list(candidate_aliases.keys())
 selected_candidates = st.sidebar.multiselect("Candidates to display", all_candidates, default=all_candidates)
+
+pubs = sorted(df["Publication"].unique())
+selected_pubs = st.sidebar.multiselect("Publications", pubs, default=pubs)
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Results update live as you change filters. Use Search tab for detailed queries.")
